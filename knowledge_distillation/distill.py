@@ -42,9 +42,11 @@ parser.add_argument('--weight-decay', '--wd', default=5e-4, type=float,
 parser.add_argument('--print-freq', '-p', default=20, type=int,
                     metavar='N', help='print frequency (default: 20)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                    help='path to latest checkpoint (default: none)')
+                    help='path to latest VGG checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
+parser.add_argument('--slim-checkpoint', default='', type=str, metavar='PATH',
+                    help='path to latest slim checkpoint (default: none)')
 parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                     help='use pre-trained model')
 parser.add_argument('--half', dest='half', action='store_true',
@@ -92,7 +94,7 @@ def get_vgg_model(args):
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
-            print "=> loading checkpoint '{}'".format(args.resume)
+            print("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume)
             # args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
@@ -100,11 +102,14 @@ def get_vgg_model(args):
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.evaluate, checkpoint['epoch']))
         else:
-            print "=> no checkpoint found at '{}'".format(args.resume)
+            print("=> no checkpoint found at '{}'".format(args.resume))
 
     return model
 
+
 def get_slim_model(args):
+    """Get slim model
+    """
     slim_model = slim.SimpleConvNet(hidden=1000)
     slim_model.cuda()
     if slim_model is slim.DeepConvNet:
@@ -114,9 +119,28 @@ def get_slim_model(args):
                 m.bias.data.normal_(0, 0.0)
     return slim_model
 
+
+def load_weight(model, checkpoint_path):
+    """Load weights into model
+    """
+    if os.path.isfile(checkpoint_path):
+        print"=> loading checkpoint '{}'".format(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path)
+        best_prec1 = checkpoint['best_prec1']
+        model.load_state_dict(checkpoint['state_dict'])
+        print("=> loaded checkpoint '{}' (epoch {})"
+              .format(args.evaluate, checkpoint['epoch']))
+    else:
+        print("=> no checkpoint found at '{}'".format(checkpoint_path))
+
+
 def distillation_loss(y, labels, teacher_scores, T, alpha):
     return nn.KLDivLoss()(nn.functional.log_softmax(y / T), nn.functional.softmax(teacher_scores/T)) * (T*T * 2.0 * alpha) + nn.functional.cross_entropy(y, labels) * (1. - alpha)
 
+
+"""
+MAIN
+"""
 def main():
     global args, best_prec1
     args = parser.parse_args()
@@ -140,7 +164,11 @@ def main():
                                 weight_decay=args.weight_decay)
 
     if args.evaluate:
-        validate(val_loader, model, criterion)
+        if args.slim_checkpoint:
+            load_weight(small_model, args.slim_checkpoint)
+            validate(val_loader, small_model, criterion)
+        else:
+            print("Error: slim checkpoint path not set")
         return
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -161,7 +189,7 @@ def main():
             'best_prec1': best_prec1,
         }, is_best, filename=os.path.join(args.save_dir, 'checkpoint_{}.tar'.format(epoch)))
 
-    print best_prec1
+    print(best_prec1)
 
 
 def train_distill(train_loader, big_model, small_model, criterion, optimizer, epoch):
@@ -213,8 +241,9 @@ def train_distill(train_loader, big_model, small_model, criterion, optimizer, ep
         loss = loss.float()
         # measure accuracy and record loss
         prec1 = accuracy(output.data, target)[0]
-        losses.update(loss.data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
+
+        losses.update(loss.data.item(), input.size(0))
+        top1.update(prec1.item(), input.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -259,8 +288,8 @@ def validate(val_loader, model, criterion):
 
         # measure accuracy and record loss
         prec1 = accuracy(output.data, target)[0]
-        losses.update(loss.data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
+        losses.update(loss.data.item(), input.size(0))
+        top1.update(prec1.item(), input.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
