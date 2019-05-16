@@ -2,6 +2,7 @@ import argparse
 import os
 import shutil
 import time
+import re
 
 import torch
 import torch.nn as nn
@@ -11,8 +12,11 @@ import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+from neural_style.transformer_net import TransformerNet
+from neural_style.small_transformer_net import SmallTransformerNet
 import vgg
 import slim
+
 
 model_names = sorted(name for name in vgg.__dict__
     if name.islower() and not name.startswith("__")
@@ -41,8 +45,8 @@ parser.add_argument('--weight-decay', '--wd', default=5e-4, type=float,
                     metavar='W', help='weight decay (default: 5e-4)')
 parser.add_argument('--print-freq', '-p', default=20, type=int,
                     metavar='N', help='print frequency (default: 20)')
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                    help='path to latest VGG checkpoint (default: none)')
+parser.add_argument('--teacher-checkpoint', default='', type=str, metavar='PATH',
+                    help='Path to the checkpoint of the teacher (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 parser.add_argument('--slim-checkpoint', default='', type=str, metavar='PATH',
@@ -70,6 +74,7 @@ def get_train_loader(args):
         batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True)
 
+
 def get_val_loader(args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
@@ -80,6 +85,7 @@ def get_val_loader(args):
         ])),
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
+
 
 def get_vgg_model(args):
     # Check the save_dir exists or not
@@ -92,31 +98,51 @@ def get_vgg_model(args):
     model.cuda()
 
     # optionally resume from a checkpoint
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume)
+    if args.teacher_checkpoint:
+        if os.path.isfile(args.teacher_checkpoint):
+            print("=> loading checkpoint '{}'".format(args.teacher_checkpoint))
+            checkpoint = torch.load(args.teacher_checkpoint)
             # args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.evaluate, checkpoint['epoch']))
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+            print("=> no checkpoint found at '{}'".format(args.teacher_checkpoint))
 
     return model
+
+
+def get_style_network(args):
+    """ Get style network
+    """
+    with torch.no_grad():
+        style_model = TransformerNet()
+        style_model.cuda()
+
+        if args.teacher_checkpoint:
+            if os.path.isfile(args.teacher_checkpoint):
+                #load_weight(style_model, args.teacher_checkpoint)
+                state_dict = torch.load(args.teacher_checkpoint)
+                # remove saved deprecated running_* keys in InstanceNorm from the checkpoint
+                for k in list(state_dict.keys()):
+                    if re.search(r'in\d+\.running_(mean|var)$', k):
+                        del state_dict[k]
+                style_model.load_state_dict(state_dict)
+
+                print("Loaded checkpoint for teacher network")
+            else:
+                print("=> no checkpoint found at '{}'".format(args.teacher_checkpoint))
+
+    return style_model
 
 
 def get_slim_model(args):
     """Get slim model
     """
-    slim_model = slim.SimpleConvNet(hidden=1000)
+    slim_model = SmallTransformerNet()
     slim_model.cuda()
-    if slim_model is slim.DeepConvNet:
-        for m in slim_model.modules():
-            if isinstance(m, nn.Conv2d):
-                m.weight.data.normal_(0, 0.05)
-                m.bias.data.normal_(0, 0.0)
+
     return slim_model
 
 
@@ -126,7 +152,6 @@ def load_weight(model, checkpoint_path):
     if os.path.isfile(checkpoint_path):
         print"=> loading checkpoint '{}'".format(checkpoint_path)
         checkpoint = torch.load(checkpoint_path)
-        best_prec1 = checkpoint['best_prec1']
         model.load_state_dict(checkpoint['state_dict'])
         print("=> loaded checkpoint '{}' (epoch {})"
               .format(args.evaluate, checkpoint['epoch']))
@@ -135,7 +160,17 @@ def load_weight(model, checkpoint_path):
 
 
 def distillation_loss(y, labels, teacher_scores, T, alpha):
-    return nn.KLDivLoss()(nn.functional.log_softmax(y / T), nn.functional.softmax(teacher_scores/T)) * (T*T * 2.0 * alpha) + nn.functional.cross_entropy(y, labels) * (1. - alpha)
+    return (
+        nn.KLDivLoss()(nn.functional.log_softmax(y / T), nn.functional.softmax(teacher_scores/T)) 
+        * (T*T * 2.0 * alpha)
+        #+ nn.functional.cross_entropy(y, labels) * (1. - alpha)
+        )
+
+
+def style_distillation_loss(output_teacher, output_student):
+
+    return torch.norm(output_teacher - output_student)
+
 
 
 """
@@ -145,14 +180,22 @@ def main():
     global args, best_prec1
     args = parser.parse_args()
 
-    big_model = get_vgg_model(args)
+    big_model = get_style_network(args)
+
+    """small_model = slim.SimpleConvNet(hidden=1000)
+    small_model.cuda()
+    if small_model is slim.DeepConvNet:
+        for m in small_model.modules():
+            if isinstance(m, nn.Conv2d):
+                m.weight.data.normal_(0, 0.05)
+                m.bias.data.normal_(0, 0.0)"""
     small_model = get_slim_model(args)
 
     cudnn.benchmark = True
     train_loader = get_train_loader(args)
     val_loader = get_val_loader(args)
 
-    # define loss function (criterion) and pptimizer
+    # define loss function (criterion) and optimizer
     criterion = distillation_loss
 
     if args.half:
@@ -224,13 +267,17 @@ def train_distill(train_loader, big_model, small_model, criterion, optimizer, ep
 
         # compute output
         output = small_model(input_var)
+        #print(output.size())
+        #print(input_var.size())
 
 	    # convert original target to one-hot representation
         target_onehot = torch.cuda.FloatTensor(*output.size())
         target_onehot.zero_()
-        target_onehot.scatter_(1, target_var.view(-1, 1), 1)
+        #target_onehot.scatter_(1, target_var.view(-1, 1), 1)
 
-        loss = criterion(output, target_var, teacher_output, T=20.0, alpha=0.7)
+        #loss = criterion(output, target_var, teacher_output, T=20.0, alpha=0.7)
+        loss = style_distillation_loss(teacher_output, output)
+        print(loss)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -239,11 +286,12 @@ def train_distill(train_loader, big_model, small_model, criterion, optimizer, ep
 
         output = output.float()
         loss = loss.float()
+        print(loss)
         # measure accuracy and record loss
-        prec1 = accuracy(output.data, target)[0]
+        #prec1 = accuracy(output.data, target)[0]
 
         losses.update(loss.data.item(), input.size(0))
-        top1.update(prec1.item(), input.size(0))
+        #top1.update(prec1.item(), input.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
