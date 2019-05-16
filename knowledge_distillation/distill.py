@@ -60,6 +60,7 @@ parser.add_argument('--save-dir', dest='save_dir',
                     default='save_temp', type=str)
 
 best_prec1 = 0
+best_loss = 0
 
 def get_train_loader(args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -169,7 +170,9 @@ def distillation_loss(y, labels, teacher_scores, T, alpha):
 
 def style_distillation_loss(output_teacher, output_student):
 
-    return torch.norm(output_teacher - output_student)
+    return torch.norm(output_teacher - output_student) / float(10**5)
+    #mse_loss = torch.nn.MSELoss()
+    #return mse_loss(output_teacher, output_student) / float(10**6)
 
 
 
@@ -177,7 +180,7 @@ def style_distillation_loss(output_teacher, output_student):
 MAIN
 """
 def main():
-    global args, best_prec1
+    global args, best_prec1, best_loss
     args = parser.parse_args()
 
     big_model = get_style_network(args)
@@ -196,7 +199,7 @@ def main():
     val_loader = get_val_loader(args)
 
     # define loss function (criterion) and optimizer
-    criterion = distillation_loss
+    criterion = style_distillation_loss
 
     if args.half:
         small_model.half()
@@ -221,18 +224,30 @@ def main():
         train_distill(train_loader, big_model, small_model, criterion, optimizer, epoch)
 
         # evaluate on validation set
-        prec1 = validate(val_loader, small_model, criterion)
+        #prec1 = validate(val_loader, small_model, criterion)
 
-        # remember best prec@1 and save checkpoint
-        is_best = prec1 > best_prec1
-        best_prec1 = max(prec1, best_prec1)
+        # compute the loss on validation set
+        loss = validate_loss(val_loader, big_model, small_model, criterion)
+
+        # remember the best loss and save checkpoint
+        is_best = loss < best_loss
+        best_loss = min(best_loss, loss)
         save_checkpoint({
             'epoch': epoch + 1,
             'state_dict': small_model.state_dict(),
-            'best_prec1': best_prec1,
+            'best_loss': best_loss,
         }, is_best, filename=os.path.join(args.save_dir, 'checkpoint_{}.tar'.format(epoch)))
 
-    print(best_prec1)
+        # remember best prec@1 and save checkpoint
+        #is_best = prec1 > best_prec1
+        #best_prec1 = max(prec1, best_prec1)
+        #save_checkpoint({
+        #    'epoch': epoch + 1,
+        #    'state_dict': small_model.state_dict(),
+        #    'best_prec1': best_prec1,
+        #}, is_best, filename=os.path.join(args.save_dir, 'checkpoint_{}.tar'.format(epoch)))
+
+    print("Best loss: {}".format(best_loss))
 
 
 def train_distill(train_loader, big_model, small_model, criterion, optimizer, epoch):
@@ -242,13 +257,71 @@ def train_distill(train_loader, big_model, small_model, criterion, optimizer, ep
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
-    top1 = AverageMeter()
 
     # switch to train mode
     small_model.train()
     big_model.eval()
 
     end = time.time()
+    for i, (input, target) in enumerate(train_loader):
+
+        # measure data loading time
+        data_time.update(time.time() - end)
+
+        target = target.cuda(async=True)
+        input_var = torch.autograd.Variable(input).cuda()
+        #target_var = torch.autograd.Variable(target)
+        if args.half:
+            input_var = input_var.half()
+
+        # compute big model output
+        with torch.no_grad():
+            teacher_output = big_model(input_var).data.cpu().numpy()
+            teacher_output = torch.cuda.FloatTensor(teacher_output)
+
+        # compute output
+        output = small_model(input_var)
+
+	    # convert original target to one-hot representation
+        #target_onehot = torch.cuda.FloatTensor(*output.size())
+        #target_onehot.zero_()
+        #target_onehot.scatter_(1, target_var.view(-1, 1), 1)
+
+        #loss = criterion(output, target_var, teacher_output, T=20.0, alpha=0.7)
+        loss = criterion(teacher_output, output)
+
+        # compute gradient and do SGD step
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        output = output.float()
+        loss = loss.float()
+        losses.update(loss.data.item(), input.size(0))
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        if i % args.print_freq == 0:
+            print('Epoch: [{0}][{1}/{2}]\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'Loss {loss.val:.3f} ({loss.avg:.3f})'.format(
+                      epoch, i, len(train_loader), batch_time=batch_time,
+                      data_time=data_time, loss=losses))
+
+def validate(val_loader, model, criterion):
+    """
+    Run evaluation
+    """
+    batch_time = AverageMeter()
+    losses = AverageMeter()
+    top1 = AverageMeter()
+
+    # switch to evaluate mode
+    model.eval()
+
     for i, (input, target) in enumerate(train_loader):
 
         # measure data loading time
@@ -267,17 +340,14 @@ def train_distill(train_loader, big_model, small_model, criterion, optimizer, ep
 
         # compute output
         output = small_model(input_var)
-        #print(output.size())
-        #print(input_var.size())
 
 	    # convert original target to one-hot representation
-        target_onehot = torch.cuda.FloatTensor(*output.size())
-        target_onehot.zero_()
+        #target_onehot = torch.cuda.FloatTensor(*output.size())
+        #target_onehot.zero_()
         #target_onehot.scatter_(1, target_var.view(-1, 1), 1)
 
         #loss = criterion(output, target_var, teacher_output, T=20.0, alpha=0.7)
-        loss = style_distillation_loss(teacher_output, output)
-        print(loss)
+        loss = criterion(teacher_output, output)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -286,81 +356,49 @@ def train_distill(train_loader, big_model, small_model, criterion, optimizer, ep
 
         output = output.float()
         loss = loss.float()
-        print(loss)
-        # measure accuracy and record loss
-        #prec1 = accuracy(output.data, target)[0]
-
         losses.update(loss.data.item(), input.size(0))
-        #top1.update(prec1.item(), input.size(0))
 
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
+    return top1.avg
 
-        if i % args.print_freq == 0:
-            print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-                      epoch, i, len(train_loader), batch_time=batch_time,
-                      data_time=data_time, loss=losses, top1=top1))
 
-def validate(val_loader, model, criterion):
+def validate_loss(val_loader, big_model, small_model, criterion):
+    """ Compute an averaged loss for the validation dataset
     """
-    Run evaluation
-    """
-    batch_time = AverageMeter()
     losses = AverageMeter()
-    top1 = AverageMeter()
 
-    # switch to evaluate mode
-    model.eval()
+    # switch to train mode
+    small_model.train()
+    big_model.eval()
 
     end = time.time()
     for i, (input, target) in enumerate(val_loader):
-        target = target.cuda(async=True)
-        input_var = torch.autograd.Variable(input, requires_grad=False).cuda()
-        target_var = torch.autograd.Variable(target, requires_grad=False)
+        input_var = torch.autograd.Variable(input).cuda()
 
         if args.half:
             input_var = input_var.half()
 
+        # compute big model output
+        with torch.no_grad():
+            teacher_output = big_model(input_var).data.cpu().numpy()
+            teacher_output = torch.cuda.FloatTensor(teacher_output)
+
         # compute output
-        criterion = nn.CrossEntropyLoss().cuda()
-        output = model(input_var)
-        loss = criterion(output, target_var)
+        with torch.no_grad():
+            student_output = small_model(input_var)
 
-        output = output.float()
-        loss = loss.float()
-
-        # measure accuracy and record loss
-        prec1 = accuracy(output.data, target)[0]
+        # Compute the loss
+        loss = criterion(teacher_output, student_output).float()
         losses.update(loss.data.item(), input.size(0))
-        top1.update(prec1.item(), input.size(0))
 
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
+    return losses.avg
 
-        if i % args.print_freq == 0:
-            print('Test: [{0}/{1}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-                      i, len(val_loader), batch_time=batch_time, loss=losses,
-                      top1=top1))
-
-    print(' * Prec@1 {top1.avg:.3f}'
-          .format(top1=top1))
-
-    return top1.avg
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     """
     Save the training model
     """
     torch.save(state, filename)
+
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
