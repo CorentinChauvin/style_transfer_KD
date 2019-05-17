@@ -61,6 +61,8 @@ parser.add_argument('--save-dir', dest='save_dir',
 
 parser.add_argument('--coco', action='store_true',
                     help='use coco dataset ')
+parser.add_argument('--coco-dataset', type=str,
+                    help='path to coco dataset ')
 
 best_prec1 = 0
 best_loss = 0
@@ -68,21 +70,19 @@ best_loss = 0
 def get_train_loader(args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
+    transform = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(32, 4),
+            transforms.ToTensor(),
+            normalize,
+        ])
 
     if args.coco:
-        data = datasets.CocoCaptions(root='./data', train=True, transform=transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32, 4),
-            transforms.ToTensor(),
-            normalize,
-        ]))
+        data = datasets.ImageFolder(args.coco_dataset, transform=transform)
+        print("COCO loaded")
     else:
-        data = datasets.CIFAR10(root='./data', train=True, transform=transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32, 4),
-            transforms.ToTensor(),
-            normalize,
-        ]), download=True)
+        data = datasets.CIFAR10(root='./data', train=True, transform=transform,
+                                download=True)
 
     return torch.utils.data.DataLoader(
         data,
