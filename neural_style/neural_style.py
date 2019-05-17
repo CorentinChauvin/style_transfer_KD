@@ -14,6 +14,7 @@ import torch.onnx
 
 import utils
 from transformer_net import TransformerNet
+from small_transformer_net import SmallTransformerNet
 from vgg import Vgg16
 
 
@@ -134,8 +135,17 @@ def stylize(args):
         output = stylize_onnx_caffe2(content_image, args)
     else:
         with torch.no_grad():
-            style_model = TransformerNet()
+            if args.distilled:
+                style_model = SmallTransformerNet()
+            else:
+                style_model = TransformerNet()
+
+            # Load model from checkpoint
             state_dict = torch.load(args.model)
+
+            if 'state_dict' in state_dict:
+                state_dict = state_dict['state_dict']
+
             # remove saved deprecated running_* keys in InstanceNorm from the checkpoint
             for k in list(state_dict.keys()):
                 if re.search(r'in\d+\.running_(mean|var)$', k):
@@ -219,6 +229,9 @@ def main():
                                  help="set it to 1 for running on GPU, 0 for CPU")
     eval_arg_parser.add_argument("--export_onnx", type=str,
                                  help="export ONNX model to a given file")
+
+    eval_arg_parser.add_argument("--distilled", action='store_true',
+                                 help="use a distilled version of the style network")
 
     args = main_arg_parser.parse_args()
 
