@@ -59,6 +59,8 @@ parser.add_argument('--save-dir', dest='save_dir',
                     help='The directory used to save the trained models',
                     default='save_temp', type=str)
 
+parser.add_argument('--transfer-learning', action='store_true',
+                    help='Load initially part of teacher network in student network ')
 parser.add_argument('--coco', action='store_true',
                     help='use coco dataset ')
 parser.add_argument('--coco-dataset', type=str,
@@ -102,32 +104,6 @@ def get_val_loader(args):
         num_workers=args.workers, pin_memory=True)
 
 
-def get_vgg_model(args):
-    # Check the save_dir exists or not
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
-
-    model = vgg.__dict__[args.arch]()
-
-    model.features = torch.nn.DataParallel(model.features)
-    model.cuda()
-
-    # optionally resume from a checkpoint
-    if args.teacher_checkpoint:
-        if os.path.isfile(args.teacher_checkpoint):
-            print("=> loading checkpoint '{}'".format(args.teacher_checkpoint))
-            checkpoint = torch.load(args.teacher_checkpoint)
-            # args.start_epoch = checkpoint['epoch']
-            best_prec1 = checkpoint['best_prec1']
-            model.load_state_dict(checkpoint['state_dict'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.evaluate, checkpoint['epoch']))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.teacher_checkpoint))
-
-    return model
-
-
 def get_style_network(args):
     """ Get style network
     """
@@ -152,13 +128,31 @@ def get_style_network(args):
     return style_model
 
 
-def get_slim_model(args):
-    """Get slim model
+def get_small_model(args):
+    """Get small model
     """
-    slim_model = SmallTransformerNet()
-    slim_model.cuda()
+    small_model = SmallTransformerNet()
+    small_model.cuda()
 
-    return slim_model
+    if args.transfer_learning and args.teacher_checkpoint:
+        if os.path.isfile(args.teacher_checkpoint):
+            teacher_dict = torch.load(args.teacher_checkpoint)
+            student_dict = small_model.state_dict()
+
+            # 1. filter out unnecessary keys
+            teacher_dict = {k: v for k, v in teacher_dict.items() if k in student_dict}
+
+            # 2. overwrite entries in the student state dict
+            student_dict.update(teacher_dict)
+
+            # 3. load the new state dict
+            small_model.load_state_dict(student_dict)
+
+            print("Initialise student network with transfer learning")
+        else:
+            print("=> no checkpoint found at '{}'".format(args.teacher_checkpoint))
+
+    return small_model
 
 
 def load_weight(model, checkpoint_path):
@@ -194,7 +188,7 @@ def style_distillation_loss(output_teacher, output_student):
 MAIN
 """
 def main():
-    global args, best_prec1, best_loss
+    global args, best_prec1, best_loss, lr
     args = parser.parse_args()
 
     big_model = get_style_network(args)
@@ -206,7 +200,7 @@ def main():
             if isinstance(m, nn.Conv2d):
                 m.weight.data.normal_(0, 0.05)
                 m.bias.data.normal_(0, 0.0)"""
-    small_model = get_slim_model(args)
+    small_model = get_small_model(args)
 
     cudnn.benchmark = True
     train_loader = get_train_loader(args)
@@ -231,6 +225,12 @@ def main():
             print("Error: slim checkpoint path not set")
         return
 
+    # Create/Reset loss file
+    loss_file = open(os.path.join(args.save_dir, 'losses.csv'), 'w')
+    loss_file.write("Epoch, Batch, Loss, Learning rate\n")
+    loss_file.close()
+
+    # Main loop
     for epoch in range(args.start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch)
 
@@ -268,6 +268,7 @@ def train_distill(train_loader, big_model, small_model, criterion, optimizer, ep
     """
         Run one train epoch
     """
+    global lr
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -325,7 +326,11 @@ def train_distill(train_loader, big_model, small_model, criterion, optimizer, ep
                       epoch, i, len(train_loader), batch_time=batch_time,
                       data_time=data_time, loss=losses))
 
-    return loss.avg
+            loss_file = open(os.path.join(args.save_dir, 'losses.csv'.format(epoch)), 'a')
+            loss_file.write("{}, {}, {}, {}\n".format(epoch, i, losses.val, lr))
+            loss_file.close()
+
+    return losses.avg
 
 
 def validate(val_loader, model, criterion):
@@ -437,7 +442,8 @@ class AverageMeter(object):
 
 def adjust_learning_rate(optimizer, epoch):
     """Sets the learning rate to the initial LR decayed by 2 every 30 epochs"""
-    lr = args.lr * (0.5 ** (epoch // 20))
+    global lr
+    lr = args.lr * (0.5 ** (epoch // 3))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 

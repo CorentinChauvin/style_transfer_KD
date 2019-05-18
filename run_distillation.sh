@@ -1,9 +1,10 @@
 python2 distillation_main.py \
 	--save-dir ../distill_results \
 	--teacher-checkpoint models/mosaic.pth \
-	--learning-rate 0.05 \
+	--learning-rate 0.005 \
 	--coco \
-	--coco-dataset data/COCO_2017/
+	--coco-dataset data/COCO_2017/ \
+	--transfer-learning
 	#--arch vgg11 \
 	#--evaluate \
 	#--slim-checkpoint /home/${user}/distill_results/checkpoint_86.tar
