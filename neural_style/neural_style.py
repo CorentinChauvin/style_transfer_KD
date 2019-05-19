@@ -191,7 +191,7 @@ def stylize(args):
             # Print the losses
             total_loss = content_loss + style_loss
 
-            print("Content: {:.4} ; Style: {:.4} ; Total: {:.4}".format(
+            print("Style: {:.4} ; Content: {:.4} ; Total: {:.4}".format(
                 style_loss, content_loss, total_loss
                 ))
 
