@@ -159,6 +159,42 @@ def stylize(args):
                 output = style_model(content_image).cpu()
     utils.save_image(args.output_image, output[0])
 
+    # If required, print the loss function of the generated image
+    if args.print_loss:
+        with torch.no_grad():
+            vgg = Vgg16(requires_grad=False).to(device)
+            features_x = vgg(content_image)
+            features_y = vgg(output)
+
+            # Content loss
+            mse_loss = torch.nn.MSELoss()
+            content_loss = (args.content_weight
+                         * mse_loss(features_y.relu2_2, features_x.relu2_2)
+                         )
+
+            # Style loss
+            style_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.mul(255))
+            ])
+            style = utils.load_image(args.style_image, size=args.style_size)
+            style = style_transform(style)
+            style = style.repeat(1, 1, 1, 1).to(device)
+
+            feature_style = vgg(style)
+            gram_style = utils.gram_matrix(feature_style[0])
+            gram_y = utils.gram_matrix(features_y[0])
+
+            style_loss =  mse_loss(gram_y, gram_style)
+            style_loss *= args.style_weight
+
+            # Print the losses
+            total_loss = content_loss + style_loss
+
+            print("Content: {:.4} ; Style: {:.4} ; Total: {:.4}".format(
+                style_loss, content_loss, total_loss
+                ))
+
 
 def stylize_onnx_caffe2(content_image, args):
     """
@@ -232,6 +268,16 @@ def main():
 
     eval_arg_parser.add_argument("--distilled", action='store_true',
                                  help="use a distilled version of the style network")
+    eval_arg_parser.add_argument("--print-loss", action='store_true',
+                                 help="print the loss of the generated image")
+    eval_arg_parser.add_argument("--style-image", type=str, default="images/style-images/mosaic.jpg",
+                                  help="path to style-image (required for loss)")
+    eval_arg_parser.add_argument("--content-weight", type=float, default=1e5,
+                                  help="weight for content-loss, default is 1e5")
+    eval_arg_parser.add_argument("--style-weight", type=float, default=1e10,
+                                  help="weight for style-loss, default is 1e10")
+    eval_arg_parser.add_argument("--style-size", type=int, default=None,
+                                  help="size of style-image, default is the original size of style image")
 
     args = main_arg_parser.parse_args()
 
